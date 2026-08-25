@@ -27,6 +27,8 @@ import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadr
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
+import { resolveModalityBridgeModel } from "../services/visionBridge.js";
+import { normalizeAttachmentsToContent } from "../translator/concerns/attachments.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 
@@ -58,7 +60,8 @@ export function stripContinuityFields(body) {
 }
 
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
-  const { provider, model } = modelInfo;
+  const { provider } = modelInfo;
+  let { model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {
@@ -77,6 +80,23 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (bypassResponse) return bypassResponse;
 
   const alias = PROVIDER_ID_TO_ALIAS[provider] || provider;
+
+  // Merge Vercel-AI-SDK-style `attachments`/`experimental_attachments` into
+  // `content` blocks before anything else runs. Every translator only ever
+  // reads `content` — without this, a client that attaches files this way
+  // (observed: Zed) has its images silently vanish before reaching any
+  // provider, regardless of whether the target model supports vision.
+  if (normalizeAttachmentsToContent(body, sourceFormat)) {
+    log?.debug?.("MODALITY", "merged attachments/experimental_attachments into content blocks");
+  }
+
+  // Modality Bridge (opt-in via MODALITY_BRIDGE_ENABLED): reroute to a
+  // vision-capable sibling model on this same provider when the picked
+  // model can't read images but the request carries an image. Must run
+  // before every model-derived lookup below (stripList/upstreamModel/caps)
+  // so they all resolve against the bridged model, not the original one.
+  const modalityBridge = resolveModalityBridgeModel(provider, alias, model, body, sourceFormat, log);
+  if (modalityBridge.bridged) model = modalityBridge.model;
   const modelTargetFormat = getModelTargetFormat(alias, model);
   // Multi-endpoint providers: pick transport matching sourceFormat → zero translation.
   // Per-model guard: only use the transport when the model declares support for that
