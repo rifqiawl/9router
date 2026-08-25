@@ -50,10 +50,25 @@ function extractEmailFromAccessToken(accessToken) {
   return payload.email || payload.preferred_username || payload.sub || undefined;
 }
 
-export async function fetchKiroProfileArn(accessToken) {
-  if (!accessToken) return null;
+// Regions where AWS currently hosts the Amazon Q Developer profile, regardless
+// of which region the IAM Identity Center (IdC) instance itself lives in — AWS
+// stores Q Developer profile data ONLY in these regions
+// ("Regardless of the IAM Identity Center Region, data is stored in the
+// Region where you create the Amazon Q Developer profile"). An IdC in any
+// other region (e.g. eu-north-1) still resolves to a profile in one of these.
+const KIRO_PROFILE_REGIONS = ["us-east-1", "eu-central-1"];
+
+function kiroListProfilesHost(region) {
+  // us-east-1 keeps the legacy codewhisperer host (AWS Builder ID home
+  // region); other regions use the regional Amazon Q endpoint.
+  return region === "us-east-1"
+    ? "https://codewhisperer.us-east-1.amazonaws.com"
+    : `https://q.${region}.amazonaws.com`;
+}
+
+async function listKiroProfilesForRegion(accessToken, region) {
   try {
-    const response = await fetch("https://codewhisperer.us-east-1.amazonaws.com/ListAvailableProfiles", {
+    const response = await fetch(`${kiroListProfilesHost(region)}/ListAvailableProfiles`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -68,6 +83,40 @@ export async function fetchKiroProfileArn(accessToken) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Discover a Kiro/CodeWhisperer profile ARN for an OAuth access token.
+ *
+ * Only probing us-east-1 misses any account whose Q Developer profile was
+ * provisioned in eu-central-1 — most commonly IAM Identity Center (IdC)
+ * accounts, whose IdC instance can live in any AWS region while the profile
+ * itself is pinned to us-east-1 or eu-central-1. For those accounts the old
+ * single-region call returned zero profiles, so profileArn stayed null and
+ * every request either fell back to a shared default profile it doesn't own
+ * (403) or was sent without one at all — surfacing as "model unavailable" /
+ * intermittent access, not a clean error pointing at the real cause.
+ *
+ * `preferredRegion` (e.g. a previously-stored region for this connection) is
+ * probed first when it's a known profile region, purely to save a round-trip
+ * on the common case — every region is still tried on a miss.
+ *
+ * @param {string} accessToken
+ * @param {string} [preferredRegion]
+ * @returns {Promise<string|null>}
+ */
+export async function fetchKiroProfileArn(accessToken, preferredRegion) {
+  if (!accessToken) return null;
+
+  const regions = KIRO_PROFILE_REGIONS.includes(preferredRegion)
+    ? [preferredRegion, ...KIRO_PROFILE_REGIONS.filter((r) => r !== preferredRegion)]
+    : KIRO_PROFILE_REGIONS;
+
+  for (const region of regions) {
+    const arn = await listKiroProfilesForRegion(accessToken, region);
+    if (arn) return arn;
+  }
+  return null;
 }
 
 export function extractCodexAccountInfo(idToken) {
