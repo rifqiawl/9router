@@ -420,7 +420,14 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   if (profileArn) {
     payload.profileArn = profileArn;
   }
-  if (systemPrompt) payload.systemPrompt = systemPrompt;
+  // Do NOT set payload.systemPrompt here — Kiro upstream rejects a top-level
+  // systemPrompt field with 400 REQUEST_BODY_INVALID for a real slice of live
+  // traffic (verified independently on Windows and Linux, Codex CLI via
+  // /v1/responses, and via IAM Identity Center auth — see #3459/#3422/#3296
+  // in decolua/9router). systemPrompt is already delivered through
+  // applyKiroSessionReplay()'s contentPrefix injection into the actual
+  // message content above, so this field was a redundant duplicate, not the
+  // only delivery path.
   if (additionalModelRequestFields) {
     payload.additionalModelRequestFields = additionalModelRequestFields;
   }
