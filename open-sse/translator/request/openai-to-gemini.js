@@ -338,6 +338,23 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
         for (const block of msg.content) {
           if (block.type === CLAUDE_BLOCK.TEXT) {
             parts.push({ text: block.text });
+          } else if (block.type === CLAUDE_BLOCK.IMAGE && block.source) {
+            // openaiToClaudeRequest() already built a Claude-shaped
+            // {type:"image", source:{type:"base64", media_type, data}}
+            // block for any OpenAI image_url/data-URI input — this path
+            // (Claude models served through Antigravity's Cloud Code
+            // envelope) previously had no case for it at all, so every
+            // image silently vanished between here and the upstream
+            // request with no error and no placeholder.
+            if (block.source.type === "base64" && block.source.data) {
+              parts.push({
+                inlineData: { mime_type: block.source.media_type, data: block.source.data }
+              });
+            } else if (block.source.type === "url" && block.source.url) {
+              parts.push({
+                fileData: { fileUri: block.source.url, mimeType: block.source.media_type || "image/*" }
+              });
+            }
           } else if (block.type === CLAUDE_BLOCK.TOOL_USE) {
             parts.push({
               thoughtSignature: signature,
