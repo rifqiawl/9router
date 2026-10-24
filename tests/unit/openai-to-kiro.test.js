@@ -11,18 +11,17 @@ import { openaiToKiroRequest } from "../../open-sse/translator/request/openai-to
 
 const contentOf = (result) =>
   result.conversationState.currentMessage.userInputMessage.content;
-// systemPrompt is no longer sent as a top-level payload field (Kiro upstream
-// rejects it with 400 REQUEST_BODY_INVALID for a real slice of live traffic —
-// #3459/#3422/#3296). It's delivered by being prefixed into message content
-// instead (applyKiroSessionReplay's contentPrefix), landing either on the
-// current turn or on a frozen history[0], depending on session-replay state —
-// concatenate both so assertions find it regardless of which.
-const systemPromptOf = (result) => {
-  const historyContent = (result.conversationState?.history || [])
-    .map((turn) => turn?.userInputMessage?.content || "")
-    .join("\n\n");
-  return `${historyContent}\n\n${contentOf(result)}`;
+// Kiro rejects a top-level systemPrompt (400 REQUEST_BODY_INVALID; 1892ed77), so the
+// system prompt, thinking tags and agentic prompt travel at the start of the first user
+// turn, ahead of the "[Context: Current time …]" line. This returns that prompt part.
+const kiroPromptOf = (out) => {
+  const cs = out?.conversationState || {};
+  const content = (cs.history || []).find((t) => t.userInputMessage)?.userInputMessage?.content
+    ?? cs.currentMessage?.userInputMessage?.content ?? "";
+  const at = content.indexOf("[Context: Current time");
+  return (at >= 0 ? content.slice(0, at) : content).trim();
 };
+const systemPromptOf = kiroPromptOf;
 
 describe("openaiToKiroRequest", () => {
   describe("basic message conversion", () => {
@@ -543,7 +542,8 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(systemPromptOf(result)).toContain("<max_thinking_length>32000</max_thinking_length>");
-      expect(result.additionalModelRequestFields?.output_config?.effort).toBe("high");
+      // 4.6 models accept max on Kiro (7894f3d3); only xhigh clamps to high there.
+      expect(result.additionalModelRequestFields?.output_config?.effort).toBe("max");
     });
 
     it("clamps OpenAI Responses reasoning.effort xhigh to max_thinking_length 32000", () => {
@@ -579,7 +579,7 @@ describe("openaiToKiroRequest", () => {
       expect(systemPromptOf(result)).toContain("<max_thinking_length>16000</max_thinking_length>");
     });
 
-    it("never sends systemPrompt as a top-level payload field (Kiro rejects it with 400)", () => {
+    it("keeps the prompt stable across turns and never sends a top-level systemPrompt", () => {
       const first = openaiToKiroRequest(
         "claude-sonnet-4.6-thinking",
         { messages: [{ role: "user", content: "first" }] },
@@ -593,10 +593,11 @@ describe("openaiToKiroRequest", () => {
         {}
       );
 
-      expect(first.systemPrompt).toBeUndefined();
-      expect(second.systemPrompt).toBeUndefined();
+      expect(first).not.toHaveProperty("systemPrompt");
+      expect(kiroPromptOf(first)).toContain("<thinking_mode>enabled</thinking_mode>");
+      expect(kiroPromptOf(first)).toBe(kiroPromptOf(second));
+      expect(kiroPromptOf(first)).not.toContain("Current time");
       expect(first.conversationState.currentMessage.userInputMessage.content).toContain("Current time");
-      expect(first.conversationState.currentMessage.userInputMessage.content).toContain("<thinking_mode>enabled</thinking_mode>");
     });
 
     it("replays frozen msg0 for explicit Kiro sessions while keeping current time fresh", () => {
